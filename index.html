@@ -52,6 +52,25 @@
   }
   .refresh-btn:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
   .refresh-btn:disabled { opacity: 0.6; cursor: wait; }
+  .toggle-row {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 10px; margin: -4px 0 8px; font-size: 12px; color: var(--text-secondary);
+  }
+  .toggle-row input[type=checkbox] { width: 16px; height: 16px; accent-color: var(--accent); }
+  .weekend-indicator {
+    display: inline-flex; align-items: center; gap: 7px;
+    font-size: 11px; border-radius: 999px; padding: 4px 9px;
+    border: 0.5px solid var(--border-strong); background: var(--surface-2); color: var(--text-secondary);
+    margin-bottom: 8px;
+  }
+  .weekend-dot {
+    width: 7px; height: 7px; border-radius: 50%;
+    background: var(--text-tertiary);
+  }
+  .weekend-indicator.active { border-color: var(--success-border); background: var(--success-bg); color: var(--success-text); }
+  .weekend-indicator.active .weekend-dot { background: var(--success-text); }
+  .weekend-indicator.soon { border-color: rgba(179,120,0,0.35); background: rgba(255,210,112,0.18); color: #8a5a00; }
+  .weekend-indicator.soon .weekend-dot { background: #b37800; }
   .field-row input {
     width: 110px; padding: 7px 10px; font-size: 15px; font-weight: 500;
     color: var(--text-primary); background: var(--surface-2);
@@ -71,6 +90,7 @@
   .r-note { font-size: 11px; color: var(--text-tertiary); margin-top: 3px; line-height: 1.5; }
   .result-card.winner .r-note { color: var(--success-text); opacity: 0.8; }
   .diff-bar { margin-top: 12px; padding: 10px 14px; background: var(--surface-2); border-radius: var(--radius-sm); font-size: 13px; color: var(--text-secondary); text-align: center; min-height: 36px; display: flex; align-items: center; justify-content: center; }
+  .effective-bar { margin-top: 8px; padding: 10px 14px; background: var(--surface-2); border-radius: var(--radius-sm); font-size: 13px; color: var(--text-secondary); text-align: center; min-height: 36px; display: flex; align-items: center; justify-content: center; }
   .hint { font-size: 11px; color: var(--text-tertiary); margin-top: 6px; text-align: center; min-height: 16px; }
   input[type=number]::-webkit-inner-spin-button, input[type=number]::-webkit-outer-spin-button { opacity: 0.4; }
 </style>
@@ -88,6 +108,11 @@
   <p class="section-label">Amount to convert</p>
   <div class="field-row"><label>Euros</label><input type="number" id="euros" value="100" min="1" step="10"><span class="unit">EUR</span></div>
   <div class="field-row"><label>Revolut used this month</label><input type="number" id="revolut-used" value="0" min="0" step="10"><span class="unit">EUR</span></div>
+  <label class="toggle-row" for="weekend-markup-toggle">
+    <span>Add Revolut weekend markup fee (1%)</span>
+    <input type="checkbox" id="weekend-markup-toggle">
+  </label>
+  <div class="weekend-indicator" id="weekend-status"><span class="weekend-dot"></span><span>Checking weekend window...</span></div>
 
   <div class="divider"></div>
   <p class="section-label">Exchange office</p>
@@ -114,6 +139,7 @@
   <div class="divider"></div>
   <div class="results" id="results"></div>
   <div class="diff-bar" id="diff-note"></div>
+  <div class="effective-bar" id="effective-note"></div>
   <p class="hint" id="revolut-hint"></p>
 </div>
 
@@ -121,9 +147,68 @@
   const bankRateInput = document.getElementById('bank-rate');
   const bankRateUpdated = document.getElementById('bank-rate-updated');
   const refreshBankRateBtn = document.getElementById('refresh-bank-rate');
+  const weekendMarkupToggle = document.getElementById('weekend-markup-toggle');
+  const weekendStatus = document.getElementById('weekend-status');
+  let weekendToggleTouched = false;
 
   ['euros','revolut-used','exchange-rate','bank-rate','atm-fee'].forEach(id =>
     document.getElementById(id).addEventListener('input', calc));
+  weekendMarkupToggle.addEventListener('change', () => {
+    weekendToggleTouched = true;
+    calc();
+  });
+
+  function formatMinutes(totalMinutes) {
+    const hours = Math.floor(totalMinutes / 60);
+    const minutes = totalMinutes % 60;
+    return hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`;
+  }
+
+  function getWeekendMarkupState() {
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone: 'America/New_York', weekday: 'short', hour: '2-digit', minute: '2-digit', hour12: false
+    }).formatToParts(new Date());
+
+    const map = {};
+    parts.forEach(part => { if (part.type !== 'literal') map[part.type] = part.value; });
+
+    const dayIndex = { Mon: 0, Tue: 1, Wed: 2, Thu: 3, Fri: 4, Sat: 5, Sun: 6 }[map.weekday] ?? 0;
+    const minuteOfWeek = dayIndex * 1440 + Number(map.hour) * 60 + Number(map.minute);
+    const start = 4 * 1440 + 17 * 60;
+    const end = 6 * 1440 + 18 * 60;
+    const weekMinutes = 7 * 1440;
+    const active = minuteOfWeek >= start && minuteOfWeek < end;
+    const minutesToStart = minuteOfWeek < start
+      ? start - minuteOfWeek
+      : weekMinutes - minuteOfWeek + start;
+    const minutesToEnd = active ? end - minuteOfWeek : 0;
+
+    return { active, minutesToStart, minutesToEnd };
+  }
+
+  function updateWeekendIndicator() {
+    const state = getWeekendMarkupState();
+    if (!weekendToggleTouched) {
+      weekendMarkupToggle.checked = state.active;
+      calc();
+    }
+
+    if (state.active) {
+      const endingSoon = state.minutesToEnd <= 180;
+      weekendStatus.className = `weekend-indicator ${endingSoon ? 'soon' : 'active'}`;
+      weekendStatus.innerHTML = `<span class="weekend-dot"></span><span>Weekend markup active in ET${endingSoon ? ` (ends in ${formatMinutes(state.minutesToEnd)})` : ''}</span>`;
+      return;
+    }
+
+    if (state.minutesToStart <= 180) {
+      weekendStatus.className = 'weekend-indicator soon';
+      weekendStatus.innerHTML = `<span class="weekend-dot"></span><span>Weekend markup starts soon (${formatMinutes(state.minutesToStart)})</span>`;
+      return;
+    }
+
+    weekendStatus.className = 'weekend-indicator';
+    weekendStatus.innerHTML = '<span class="weekend-dot"></span><span>Weekend markup inactive (Fri 17:00 - Sun 18:00 ET)</span>';
+  }
 
   function formatApiDate(dateString) {
     if (!dateString) return '-';
@@ -181,8 +266,9 @@
     const freeLeft = Math.max(0, 200 - revUsed);
     const paidPart = Math.max(0, euros - freeLeft);
     const revFee = paidPart * 0.02;
-    const revAll = Math.max(0, euros - atmFee - revFee) * midRate;
-    const revTotalFee = atmFee + revFee;
+    const weekendMarkupFee = weekendMarkupToggle.checked ? euros * 0.01 : 0;
+    const revAll = Math.max(0, euros - atmFee - revFee - weekendMarkupFee) * midRate;
+    const revTotalFee = atmFee + revFee + weekendMarkupFee;
 
     const abnAtmFee = 1.50;
     const effectiveAbnRate = midRate * (1 - 0.012);
@@ -202,7 +288,7 @@
       <div class="result-card ${winner==='revolut'?'winner':''}">
         <div class="r-label">Revolut ATM${winner==='revolut'?' <span class="badge">best</span>':''}</div>
         <div class="r-amount">${fmt(revAll)} ALL</div>
-        <div class="r-note">€${fmtE(revTotalFee)} total fees${revFee>0?' (incl. 2% on €'+fmtE(paidPart)+')':''}</div>
+        <div class="r-note">€${fmtE(revTotalFee)} total fees${revFee>0?' (incl. 2% on €'+fmtE(paidPart)+')':''}${weekendMarkupToggle.checked?' + weekend 1% (€'+fmtE(weekendMarkupFee)+')':''}</div>
       </div>
       <div class="result-card ${winner==='abn'?'winner':''}">
         <div class="r-label">ABN AMRO ATM${winner==='abn'?' <span class="badge">best</span>':''}</div>
@@ -217,14 +303,30 @@
     document.getElementById('diff-note').textContent = euros > 0 && midRate > 0
       ? `Best vs worst: ${fmt(spread)} ALL difference (${spreadPct.toFixed(1)}%) — ${names[sorted[0].key]} wins` : '';
 
+    const winnerEffectiveRate = euros > 0 ? (sorted[0].val / euros) : 0;
+    document.getElementById('effective-note').textContent = euros > 0
+      ? `Effective rate: ${winnerEffectiveRate.toFixed(2)} ALL/€`
+      : '';
+
     const hint = document.getElementById('revolut-hint');
-    hint.textContent = revUsed >= 200
+    const limitText = revUsed >= 200
       ? `Revolut free limit reached — 2% fee applies to entire withdrawal`
       : freeLeft < euros
         ? `First €${fmtE(freeLeft)} free on Revolut, 2% on remaining €${fmtE(paidPart)}`
         : `Revolut free limit: €${fmtE(freeLeft)} remaining this month`;
+
+    const weekendState = getWeekendMarkupState();
+    const weekendText = weekendMarkupToggle.checked
+      ? 'Weekend markup fee enabled.'
+      : weekendState.active
+        ? 'Weekend markup window is active in ET; enable toggle to include 1% fee.'
+        : '';
+
+    hint.textContent = weekendText ? `${limitText} ${weekendText}` : limitText;
   }
   calc();
+  updateWeekendIndicator();
+  setInterval(updateWeekendIndicator, 60000);
   refreshBankRate();
 </script>
 </body>
